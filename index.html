@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <!-- ✅ Telegram WebApp SDK -->
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
     :root {
         --bg-color: #0d0d0d;
@@ -1329,11 +1330,22 @@
         } else {
             console.warn('Telegram WebApp SDK не обнаружен. Работаем в режиме браузера.');
         }
+// ============================================
+// ====== SUPABASE ======
+// ============================================
+const SUPABASE_URL = 'https://cszzdmgyfbqrlvjcwffm.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNzenpkbWd5ZmJxcmx2amN3ZmZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIwMDgzOTcsImV4cCI6MjEwNzU4NDM5N30.LsyjZ08EqMFLzasFEhuSt1Xf0LpXBbMaHXQJD6tf3w4';
 
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
         // ============================================
         // ====== БАЗА ======
         // ============================================
         let balance = 47367;
+        let savedNumbers = [];
+let recentNumbers = [];
+let currentRolledNumber = null;
+let currentFilter = 'all';
+let isRolling = false;
         const balanceDisplay = document.getElementById('balanceDisplay');
         const profileBalance = document.getElementById('profileBalance');
 
@@ -1372,124 +1384,179 @@
         }
 
         // ============================================
-        // ====== СОХРАНЕНИЕ / ЗАГРУЗКА ======
-        // ============================================
-        const SAVE_KEY = 'sim_card_game_save_v1';
+// ====== СОХРАНЕНИЕ / ЗАГРУЗКА (SUPABASE) ======
+// ============================================
 
-        function getSaveData() {
-            return {
-                balance: balance,
-                savedNumbers: savedNumbers,
-                currentTag: currentUser.tag,
-                level: 48,
-                rounds: allPlayers[0].rounds,
-                bestRarity: allPlayers[0].bestRarity,
-                bestNumber: allPlayers[0].bestNumber,
-                bestNumberPrice: allPlayers[0].bestNumberPrice,
-                savedAt: new Date().toISOString()
-            };
+const SAVE_KEY = 'sim_card_game_save_v1';
+let currentPlayerRow = null;
+
+function getSaveData() {
+    return {
+        balance: balance,
+        savedNumbers: savedNumbers,
+        currentTag: currentUser.tag,
+        level: 48,
+        rounds: allPlayers[0].rounds,
+        bestRarity: allPlayers[0].bestRarity,
+        bestNumber: allPlayers[0].bestNumber,
+        bestNumberPrice: allPlayers[0].bestNumberPrice
+    };
+}
+
+function applySaveData(data) {
+    if (!data) return;
+    if (typeof data.balance === 'number') balance = data.balance;
+    if (Array.isArray(data.savedNumbers)) savedNumbers = data.savedNumbers;
+    if (data.currentTag) currentUser.tag = data.currentTag;
+    if (data.rounds) allPlayers[0].rounds = data.rounds;
+    if (data.bestRarity) allPlayers[0].bestRarity = data.bestRarity;
+    if (data.bestNumber) allPlayers[0].bestNumber = data.bestNumber;
+    if (data.bestNumberPrice) allPlayers[0].bestNumberPrice = data.bestNumberPrice;
+    allPlayers[0].balance = balance;
+}
+
+// ===== ЗАГРУЗКА ИЗ SUPABASE =====
+async function loadProgress() {
+    if (!telegramUser) {
+        const localData = localStorage.getItem(SAVE_KEY);
+        if (localData) {
+            try { applySaveData(JSON.parse(localData)); } catch (e) {}
         }
+        refreshUI();
+        return;
+    }
 
-        function applySaveData(data) {
-            if (!data) return;
-            if (typeof data.balance === 'number') balance = data.balance;
-            if (Array.isArray(data.savedNumbers)) savedNumbers = data.savedNumbers;
-            if (data.currentTag) currentUser.tag = data.currentTag;
-            if (data.rounds) allPlayers[0].rounds = data.rounds;
-            if (data.bestRarity) allPlayers[0].bestRarity = data.bestRarity;
-            if (data.bestNumber) allPlayers[0].bestNumber = data.bestNumber;
-            if (data.bestNumberPrice) allPlayers[0].bestNumberPrice = data.bestNumberPrice;
+    try {
+        const { data, error } = await supabase
+            .from('players')
+            .select('*')
+            .eq('telegram_id', telegramUser.id)
+            .maybeSingle();
+
+        if (error) throw error;
+
+        if (data) {
+            currentPlayerRow = data;
+            balance = data.balance ?? 47367;
+            savedNumbers = data.saved_numbers || [];
+            currentUser.tag = data.tag;
+            currentUser.name = data.first_name || telegramUser.first_name || 'Игрок';
+            allPlayers[0].rounds = data.rounds ?? 0;
             allPlayers[0].balance = balance;
+            allPlayers[0].name = currentUser.name;
+            allPlayers[0].tag = currentUser.tag;
+            console.log('✅ Игрок загружен из Supabase:', data);
+        } else {
+            const newRow = {
+                telegram_id: telegramUser.id,
+                first_name: telegramUser.first_name || '',
+                last_name: telegramUser.last_name || '',
+                username: telegramUser.username || '',
+                photo_url: telegramUser.photo_url || '',
+                balance: 47367,
+                saved_numbers: [],
+                tag: null,
+                rounds: 0
+            };
+            const { data: created, error: insertErr } = await supabase
+                .from('players')
+                .insert(newRow)
+                .select()
+                .single();
+
+            if (insertErr) throw insertErr;
+            currentPlayerRow = created;
+            balance = 47367;
+            savedNumbers = [];
+            currentUser.name = telegramUser.first_name || 'Игрок';
+            currentUser.tag = null;
+            console.log('🆕 Новый игрок создан в Supabase');
+        }
+    } catch (e) {
+        console.error('Ошибка Supabase, fallback на localStorage:', e);
+        const localData = localStorage.getItem(SAVE_KEY);
+        if (localData) {
+            try { applySaveData(JSON.parse(localData)); } catch (err) {}
+        }
+    }
+
+    refreshUI();
+}
+
+// ===== СОХРАНЕНИЕ В SUPABASE =====
+let saveTimeout = null;
+function saveProgress() {
+    clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(async () => {
+        const data = getSaveData();
+        localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+
+        if (!telegramUser) {
+            console.log('💾 Сохранено локально (нет Telegram)');
+            return;
         }
 
-        // Загрузка при старте
-        function loadProgress() {
-            const localData = localStorage.getItem(SAVE_KEY);
+        try {
+            const { error } = await supabase
+                .from('players')
+                .update({
+                    balance: data.balance,
+                    saved_numbers: data.savedNumbers,
+                    tag: data.currentTag,
+                    rounds: data.rounds,
+                    updated_at: new Date().toISOString()
+                })
+                .eq('telegram_id', telegramUser.id);
 
-            if (tg && tg.CloudStorage) {
-                // Сначала пробуем облако Telegram
-                tg.CloudStorage.getItem(SAVE_KEY, (err, cloudData) => {
-                    if (!err && cloudData) {
-                        try {
-                            const data = JSON.parse(cloudData);
-                            applySaveData(data);
-                            console.log('✅ Прогресс загружен из облака Telegram');
-                        } catch (e) {
-                            console.error('Ошибка парсинга облачных данных:', e);
-                            if (localData) applySaveData(JSON.parse(localData));
-                        }
-                    } else if (localData) {
-                        try {
-                            applySaveData(JSON.parse(localData));
-                            console.log('✅ Прогресс загружен из LocalStorage');
-                        } catch (e) {}
-                    } else {
-                        console.log('🆕 Новый игрок');
-                    }
-                    refreshUI();
-                });
-            } else if (localData) {
-                try {
-                    applySaveData(JSON.parse(localData));
-                    console.log('✅ Прогресс загружен из LocalStorage');
-                } catch (e) {}
-                refreshUI();
-            } else {
-                console.log('🆕 Новый игрок (нет сохранения)');
-                refreshUI();
-            }
+            if (error) throw error;
+            console.log('💾 Сохранено в Supabase');
+        } catch (e) {
+            console.error('Ошибка сохранения в Supabase:', e);
         }
+    }, 500);
+}
 
-        // Сохранение
-        let saveTimeout = null;
-        function saveProgress() {
-            clearTimeout(saveTimeout);
-            saveTimeout = setTimeout(() => {
-                const data = getSaveData();
-                const json = JSON.stringify(data);
+function refreshUI() {
+    updateBalance();
+    updateCollection();
+    updateProfileUI();
+    renderMiniCards();
+    updateAdminVisibility();
+    updateProfileTag();
+}
 
-                // Локально всегда
-                localStorage.setItem(SAVE_KEY, json);
+async function manualSave() {
+    const data = getSaveData();
+    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
 
-                // В облако Telegram (если доступно)
-                if (tg && tg.CloudStorage) {
-                    tg.CloudStorage.setItem(SAVE_KEY, json, (err) => {
-                        if (err) console.error('Ошибка сохранения в облако:', err);
-                        else console.log('💾 Сохранено в облако Telegram');
-                    });
-                } else {
-                    console.log('💾 Сохранено локально (CloudStorage недоступен)');
-                }
-            }, 500); // дебаунс 0.5 сек
-        }
+    if (!telegramUser) {
+        showToast('success', 'Сохранено!', 'Локально (нет Telegram)');
+        return;
+    }
 
-        function refreshUI() {
-            updateBalance();
-            updateCollection();
-            updateProfileUI();
-            renderMiniCards();
-            updateAdminVisibility();
-            updateProfileTag();
-        }
+    try {
+        const { error } = await supabase
+            .from('players')
+            .update({
+                balance: data.balance,
+                saved_numbers: data.savedNumbers,
+                tag: data.currentTag,
+                rounds: data.rounds,
+                updated_at: new Date().toISOString()
+            })
+            .eq('telegram_id', telegramUser.id);
 
-        function manualSave() {
-            const data = getSaveData();
-            const json = JSON.stringify(data);
-            localStorage.setItem(SAVE_KEY, json);
-            if (tg && tg.CloudStorage) {
-                tg.CloudStorage.setItem(SAVE_KEY, json, (err) => {
-                    if (err) showToast('error', 'Ошибка сохранения', err.message || 'Попробуй позже');
-                    else showToast('success', 'Сохранено!', 'Прогресс в облаке Telegram');
-                });
-            } else {
-                showToast('success', 'Сохранено!', 'Только локально (не в Telegram)');
-            }
-        }
+        if (error) throw error;
+        showToast('success', 'Сохранено!', 'Прогресс в Supabase');
+    } catch (e) {
+        showToast('error', 'Ошибка сохранения', e.message || 'Попробуй позже');
+    }
+}
 
-        function manualLoad() {
-            loadProgress();
-            showToast('success', 'Загрузка', 'Данные обновлены');
-        }
+function manualLoad() {
+    loadProgress();
+    showToast('success', 'Загрузка', 'Данные обновлены из Supabase');
+}
 
         // ============================================
         // ====== UI ФУНКЦИИ ======
@@ -1959,11 +2026,6 @@
             { key: 'common',    chance: 87,      name: 'обычный' },
         ];
 
-        let isRolling = false;
-        let currentRolledNumber = null;
-        let recentNumbers = [];
-        let savedNumbers = [];
-        let currentFilter = 'all';
 
         function pickRarity() {
             const rand = Math.random() * 100;
@@ -2493,30 +2555,29 @@
         upgradeBtn.addEventListener('click', startUpgrade);
 
         // ============================================
-        // ====== СТАРТ ======
-        // ============================================
-        // Загружаем прогресс при запуске
-        loadProgress();
+// ====== СТАРТ ======
+// ============================================
 
-        // Если открыто в Telegram, обновим имя из профиля
-        if (telegramUser) {
-            currentUser.name = telegramUser.first_name + (telegramUser.last_name ? ' ' + telegramUser.last_name : '');
-            allPlayers[0].name = currentUser.name;
-            allPlayers[0].username = telegramUser.username ? '@' + telegramUser.username : '—';
-        }
+if (telegramUser) {
+    currentUser.name = telegramUser.first_name + (telegramUser.last_name ? ' ' + telegramUser.last_name : '');
+    allPlayers[0].name = currentUser.name;
+    allPlayers[0].username = telegramUser.username ? '@' + telegramUser.username : '—';
+}
 
-        // Первичная отрисовка (loadProgress вызовет refreshUI по завершении)
-        // но на случай если CloudStorage долго грузит — отрисуем сразу
-        refreshUI();
+// Первичная отрисовка (пока грузится Supabase)
+refreshUI();
 
-        // Автосохранение при закрытии приложения
-        window.addEventListener('beforeunload', () => {
-            const data = getSaveData();
-            localStorage.setItem(SAVE_KEY, JSON.stringify(data));
-        });
+// Загружаем прогресс из Supabase (async)
+loadProgress();
 
-        console.log('🎮 Игра загружена. User:', telegramUser);
+// Автосохранение при закрытии
+window.addEventListener('beforeunload', () => {
+    const data = getSaveData();
+    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+});
+
+console.log('🎮 Игра загружена. Telegram User:', telegramUser);
     </script>
 
 </body>
-</html>
+                        </html>
